@@ -1,17 +1,17 @@
 'use strict';
 
+const tls = require('tls');
 const fs = require('fs');
 const fsp = require('fs/promises');
 const path = require('path');
-const WebSocket = require('ws');
+const readline = require('readline');
 
 const RELAY_HOST = process.env.RELAY_HOST || 'cdn.overlewd.com';
-const RELAY_PORT = parseInt(process.env.RELAY_PORT, 10) || 8443;
-const RELAY_PATH = process.env.RELAY_PATH || '/nrscn';
+const RELAY_PORT = parseInt(process.env.RELAY_PORT, 10) || 15240;
 const AGENT_ID = process.env.AGENT_ID || 'pc1';
 const ROOT = path.resolve(process.env.AGENT_ROOT || 'C:\\Users\\Stepa');
 
-const tlsOptions = {
+const clientOptions = {
   key: fs.readFileSync(path.join(__dirname, 'certs', 'client1.key')),
   cert: fs.readFileSync(path.join(__dirname, 'certs', 'client1.crt')),
   ca: fs.readFileSync(path.join(__dirname, 'certs', 'ca.crt')),
@@ -21,18 +21,18 @@ const tlsOptions = {
 };
 
 function connect() {
-  const url = `wss://${RELAY_HOST}:${RELAY_PORT}${RELAY_PATH}`;
-  const ws = new WebSocket(url, { ...tlsOptions });
-
-  ws.on('open', () => {
+  const socket = tls.connect(RELAY_PORT, RELAY_HOST, clientOptions, () => {
     console.log('Connected to relay server');
-    ws.send(JSON.stringify({ role: 'agent', id: AGENT_ID }));
+    socket.write(JSON.stringify({ role: 'agent', id: AGENT_ID }) + '\n');
   });
 
-  ws.on('message', async (data) => {
+  const rl = readline.createInterface({ input: socket });
+  rl.on('error', () => {});
+
+  rl.on('line', async (line) => {
     let msg;
     try {
-      msg = JSON.parse(data.toString());
+      msg = JSON.parse(line);
     } catch {
       return;
     }
@@ -48,19 +48,19 @@ function connect() {
     try {
       const resolved = path.resolve(ROOT, reqPath || '');
       if (resolved !== ROOT && !resolved.startsWith(ROOT + path.sep)) {
-        send(ws, { id, error: 'Path traversal denied' });
+        send(socket, { id, error: 'Path traversal denied' });
         return;
       }
 
       switch (op) {
         case 'readdir': {
           const entries = await fsp.readdir(resolved);
-          send(ws, { id, entries });
+          send(socket, { id, entries });
           break;
         }
         case 'stat': {
           const st = await fsp.stat(resolved);
-          send(ws, {
+          send(socket, {
             id,
             stat: {
               size: st.size,
@@ -83,7 +83,7 @@ function connect() {
           try {
             const buf = Buffer.alloc(len);
             const { bytesRead } = await fh.read(buf, 0, len, pos);
-            send(ws, {
+            send(socket, {
               id,
               data: buf.slice(0, bytesRead).toString('base64'),
               pos,
@@ -95,26 +95,26 @@ function connect() {
           break;
         }
         default:
-          send(ws, { id, error: `Unknown op: ${op}` });
+          send(socket, { id, error: `Unknown op: ${op}` });
       }
     } catch (err) {
-      send(ws, { id, error: err.message });
+      send(socket, { id, error: err.message });
     }
   });
 
-  ws.on('close', () => {
+  socket.on('close', () => {
     console.log('Disconnected from relay. Reconnecting in 5s...');
     setTimeout(connect, 5000);
   });
 
-  ws.on('error', (err) => {
+  socket.on('error', (err) => {
     console.error('Connection error:', err.message);
   });
 }
 
-function send(ws, obj) {
-  if (ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(obj));
+function send(socket, obj) {
+  if (!socket.destroyed) {
+    socket.write(JSON.stringify(obj) + '\n');
   }
 }
 

@@ -1,17 +1,17 @@
 'use strict';
 
+const tls = require('tls');
 const fs = require('fs');
 const path = require('path');
-const WebSocket = require('ws');
+const readline = require('readline');
 const fuse = require('fuse-bindings');
 
 const RELAY_HOST = process.env.RELAY_HOST || 'cdn.overlewd.com';
-const RELAY_PORT = parseInt(process.env.RELAY_PORT, 10) || 8443;
-const RELAY_PATH = process.env.RELAY_PATH || '/nrscn';
+const RELAY_PORT = parseInt(process.env.RELAY_PORT, 10) || 15240;
 const AGENT_ID = process.env.AGENT_ID || 'pc1';
 const MOUNT_POINT = process.env.MOUNT_POINT || 'Z:\\';
 
-const tlsOptions = {
+const clientOptions = {
   key: fs.readFileSync(path.join(__dirname, 'certs', 'client2.key')),
   cert: fs.readFileSync(path.join(__dirname, 'certs', 'client2.crt')),
   ca: fs.readFileSync(path.join(__dirname, 'certs', 'ca.crt')),
@@ -20,14 +20,14 @@ const tlsOptions = {
   ciphers: 'TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256',
 };
 
-let ws = null;
+let socket = null;
 let nextId = 1;
 const pending = new Map();
 let mounted = false;
 
 function send(obj) {
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(obj));
+  if (socket && !socket.destroyed) {
+    socket.write(JSON.stringify(obj) + '\n');
   }
 }
 
@@ -160,22 +160,21 @@ function doUnmountAndReconnect() {
 }
 
 function connect() {
-  const url = `wss://${RELAY_HOST}:${RELAY_PORT}${RELAY_PATH}`;
-  ws = new WebSocket(url, { ...tlsOptions });
-
-  ws.on('open', () => {
+  socket = tls.connect(RELAY_PORT, RELAY_HOST, clientOptions, () => {
     console.log('Connected to relay server');
     send({ role: 'mounter', agentId: AGENT_ID });
     mountFuse();
   });
 
-  ws.on('message', (data) => {
+  const rl = readline.createInterface({ input: socket });
+  rl.on('error', () => {});
+  rl.on('line', (line) => {
     try {
-      handleResponse(JSON.parse(data.toString()));
+      handleResponse(JSON.parse(line));
     } catch {}
   });
 
-  ws.on('close', () => {
+  socket.on('close', () => {
     console.log('Disconnected from relay');
     for (const [id, cb] of pending) {
       cb(new Error('Disconnected'));
@@ -184,7 +183,7 @@ function connect() {
     doUnmountAndReconnect();
   });
 
-  ws.on('error', (err) => {
+  socket.on('error', (err) => {
     console.error('Connection error:', err.message);
   });
 }

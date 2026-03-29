@@ -1,17 +1,16 @@
 'use strict';
 
-const https = require('https');
+const tls = require('tls');
 const fs = require('fs');
 const path = require('path');
-const { WebSocketServer } = require('ws');
+const readline = require('readline');
 
-const PORT = parseInt(process.env.RELAY_PORT, 10) || 8443;
-const WS_PATH = process.env.RELAY_PATH || '/nrscn';
+const PORT = parseInt(process.env.RELAY_PORT, 10) || 15240;
 
-const agents = new Map();   // id → ws
-const mounters = new Map(); // agentId → ws
+const agents = new Map();   // id → socket
+const mounters = new Map(); // agentId → socket
 
-const server = https.createServer({
+const serverOptions = {
   key: fs.readFileSync(path.join(__dirname, 'certs', 'server.key')),
   cert: fs.readFileSync(path.join(__dirname, 'certs', 'server.crt')),
   ca: fs.readFileSync(path.join(__dirname, 'certs', 'ca.crt')),
@@ -19,18 +18,17 @@ const server = https.createServer({
   rejectUnauthorized: true,
   minVersion: 'TLSv1.3',
   ciphers: 'TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256',
-});
+};
 
-const wss = new WebSocketServer({ server, path: WS_PATH });
-
-wss.on('connection', (ws) => {
+const server = tls.createServer(serverOptions, (socket) => {
   let identified = false;
   let role = null;
   let peerId = null;
 
-  ws.on('message', (data) => {
-    const line = data.toString();
+  const rl = readline.createInterface({ input: socket });
+  rl.on('error', () => {});
 
+  rl.on('line', (line) => {
     if (!identified) {
       identified = true;
       try {
@@ -39,37 +37,37 @@ wss.on('connection', (ws) => {
           role = 'agent';
           peerId = msg.id;
           const prev = agents.get(peerId);
-          if (prev && prev.readyState === prev.OPEN) prev.close();
-          agents.set(peerId, ws);
+          if (prev && !prev.destroyed) prev.destroy();
+          agents.set(peerId, socket);
           console.log(`Agent registered: ${peerId}`);
         } else if (msg.role === 'mounter' && msg.agentId) {
           role = 'mounter';
           peerId = msg.agentId;
           const prev = mounters.get(peerId);
-          if (prev && prev.readyState === prev.OPEN) prev.close();
-          mounters.set(peerId, ws);
+          if (prev && !prev.destroyed) prev.destroy();
+          mounters.set(peerId, socket);
           console.log(`Mounter registered for agent: ${peerId}`);
         } else {
           console.error('Invalid handshake:', line);
-          ws.close();
+          socket.destroy();
         }
       } catch (e) {
         console.error('Handshake parse error:', e.message);
-        ws.close();
+        socket.destroy();
       }
       return;
     }
 
     // Forward to the other side
     if (role === 'mounter') {
-      const agentWs = agents.get(peerId);
-      if (agentWs && agentWs.readyState === agentWs.OPEN) {
-        agentWs.send(line);
+      const agentSocket = agents.get(peerId);
+      if (agentSocket && !agentSocket.destroyed) {
+        agentSocket.write(line + '\n');
       }
     } else if (role === 'agent') {
-      const mounterWs = mounters.get(peerId);
-      if (mounterWs && mounterWs.readyState === mounterWs.OPEN) {
-        mounterWs.send(line);
+      const mounterSocket = mounters.get(peerId);
+      if (mounterSocket && !mounterSocket.destroyed) {
+        mounterSocket.write(line + '\n');
       }
     }
   });
@@ -82,27 +80,27 @@ wss.on('connection', (ws) => {
     if (role === 'agent') {
       agents.delete(peerId);
       console.log(`Agent disconnected: ${peerId}`);
-      const mounterWs = mounters.get(peerId);
-      if (mounterWs && mounterWs.readyState === mounterWs.OPEN) {
-        mounterWs.send(JSON.stringify({ type: 'disconnect' }));
+      const mounterSocket = mounters.get(peerId);
+      if (mounterSocket && !mounterSocket.destroyed) {
+        mounterSocket.write(JSON.stringify({ type: 'disconnect' }) + '\n');
       }
     } else if (role === 'mounter') {
       mounters.delete(peerId);
       console.log(`Mounter disconnected for agent: ${peerId}`);
-      const agentWs = agents.get(peerId);
-      if (agentWs && agentWs.readyState === agentWs.OPEN) {
-        agentWs.send(JSON.stringify({ type: 'disconnect' }));
+      const agentSocket = agents.get(peerId);
+      if (agentSocket && !agentSocket.destroyed) {
+        agentSocket.write(JSON.stringify({ type: 'disconnect' }) + '\n');
       }
     }
   };
 
-  ws.on('close', cleanup);
-  ws.on('error', (err) => {
-    console.error(`WS error (${role}/${peerId}):`, err.message);
+  socket.on('close', cleanup);
+  socket.on('error', (err) => {
+    console.error(`Socket error (${role}/${peerId}):`, err.message);
     cleanup();
   });
 });
 
 server.listen(PORT, () => {
-  console.log(`Relay server listening on port ${PORT}, path ${WS_PATH}`);
+  console.log(`Relay server listening on port ${PORT}`);
 });
