@@ -3,7 +3,7 @@
 const net = require('net');
 const path = require('path');
 const readline = require('readline');
-const { deriveKey, encrypt, decrypt } = require('./crypto-utils');
+const { deriveKey, encrypt, decrypt, keyFingerprint } = require('./crypto-utils');
 
 const PORT = parseInt(process.env.RELAY_PORT, 10) || 15240;
 
@@ -16,6 +16,7 @@ const client1CertPath = path.join(__dirname, 'certs', 'client1.crt');
 const client2CertPath = path.join(__dirname, 'certs', 'client2.crt');
 const agentKey = deriveKey(serverKeyPath, client1CertPath);
 const mounterKey = deriveKey(serverKeyPath, client2CertPath);
+console.log(`Key fingerprints: agent=${keyFingerprint(agentKey)} mounter=${keyFingerprint(mounterKey)}`);
 
 const server = net.createServer((socket) => {
   let identified = false;

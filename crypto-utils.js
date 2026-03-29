@@ -28,4 +28,8 @@ function decrypt(key, line) {
   return decipher.update(encrypted, null, 'utf8') + decipher.final('utf8');
 }
 
-module.exports = { deriveKey, encrypt, decrypt };
+function keyFingerprint(key) {
+  return crypto.createHash('sha256').update(key).digest('hex').slice(0, 16);
+}
+
+module.exports = { deriveKey, encrypt, decrypt, keyFingerprint };

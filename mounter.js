@@ -5,7 +5,7 @@ const http = require('http');
 const path = require('path');
 const readline = require('readline');
 const { execSync } = require('child_process');
-const { deriveKey, encrypt, decrypt } = require('./crypto-utils');
+const { deriveKey, encrypt, decrypt, keyFingerprint } = require('./crypto-utils');
 
 const RELAY_HOST = process.env.RELAY_HOST || '164.92.168.166';
 const RELAY_PORT = parseInt(process.env.RELAY_PORT, 10) || 15240;
@@ -298,6 +298,6 @@ process.on('SIGINT', () => {
 // Start WebDAV server first, then connect to relay
 davServer.listen(WEBDAV_PORT, '127.0.0.1', () => {
   console.log(`WebDAV server on http://127.0.0.1:${WEBDAV_PORT}/`);
-  console.log(`Mounter starting. Agent=${AGENT_ID}, Mount=${MOUNT_POINT}`);
+  console.log(`Mounter starting. Agent=${AGENT_ID}, Mount=${MOUNT_POINT}, key=${keyFingerprint(key)}`);
   connect();
 });

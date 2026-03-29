@@ -4,7 +4,7 @@ const net = require('net');
 const fsp = require('fs/promises');
 const path = require('path');
 const readline = require('readline');
-const { deriveKey, encrypt, decrypt } = require('./crypto-utils');
+const { deriveKey, encrypt, decrypt, keyFingerprint } = require('./crypto-utils');
 
 const RELAY_HOST = process.env.RELAY_HOST || '164.92.168.166';
 const RELAY_PORT = parseInt(process.env.RELAY_PORT, 10) || 15240;
@@ -115,5 +115,5 @@ function send(socket, obj) {
   }
 }
 
-console.log(`Agent starting. ROOT=${ROOT}, ID=${AGENT_ID}`);
+console.log(`Agent starting. ROOT=${ROOT}, ID=${AGENT_ID}, key=${keyFingerprint(key)}`);
 connect();
