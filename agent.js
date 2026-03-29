@@ -27,6 +27,7 @@ function connect() {
   });
 
   const rl = readline.createInterface({ input: socket });
+  rl.on('error', () => {});
 
   rl.on('line', async (line) => {
     let msg;

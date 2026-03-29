@@ -26,6 +26,7 @@ const server = tls.createServer(serverOptions, (socket) => {
   let peerId = null;
 
   const rl = readline.createInterface({ input: socket });
+  rl.on('error', () => {});
 
   rl.on('line', (line) => {
     if (!identified) {
