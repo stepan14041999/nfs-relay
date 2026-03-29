@@ -9,7 +9,5 @@
     "mounter": "node mounter.js",
     "certs": "bash gen-certs.sh"
   },
-  "optionalDependencies": {
-    "fuse-bindings": "^2.11.2"
-  }
+  "dependencies": {}
 }

@@ -1,15 +1,17 @@
 'use strict';
 
 const net = require('net');
+const http = require('http');
 const path = require('path');
 const readline = require('readline');
-const fuse = require('fuse-bindings');
+const { execSync } = require('child_process');
 const { deriveKey, encrypt, decrypt } = require('./crypto-utils');
 
 const RELAY_HOST = process.env.RELAY_HOST || '164.92.168.166';
 const RELAY_PORT = parseInt(process.env.RELAY_PORT, 10) || 15240;
 const AGENT_ID = process.env.AGENT_ID || 'pc1';
-const MOUNT_POINT = process.env.MOUNT_POINT || 'Z:\\';
+const MOUNT_POINT = process.env.MOUNT_POINT || 'Z:';
+const WEBDAV_PORT = parseInt(process.env.WEBDAV_PORT, 10) || 18080;
 
 const key = deriveKey(
   path.join(__dirname, 'certs', 'client2.key'),
@@ -21,7 +23,7 @@ let nextId = 1;
 const pending = new Map();
 let mounted = false;
 
-function send(obj) {
+function sendRelay(obj) {
   if (socket && !socket.destroyed) {
     socket.write(encrypt(key, JSON.stringify(obj)) + '\n');
   }
@@ -29,26 +31,28 @@ function send(obj) {
 
 const REQUEST_TIMEOUT = 30000;
 
-function request(op, reqPath, extra, cb) {
-  const id = nextId++;
-  const msg = { id, op, path: reqPath, ...extra };
-  const timer = setTimeout(() => {
-    if (pending.has(id)) {
-      pending.delete(id);
-      cb(new Error('Request timed out'));
-    }
-  }, REQUEST_TIMEOUT);
-  pending.set(id, (err, res) => {
-    clearTimeout(timer);
-    cb(err, res);
+function request(op, reqPath, extra) {
+  return new Promise((resolve, reject) => {
+    const id = nextId++;
+    const msg = { id, op, path: reqPath, ...extra };
+    const timer = setTimeout(() => {
+      if (pending.has(id)) {
+        pending.delete(id);
+        reject(new Error('Request timed out'));
+      }
+    }, REQUEST_TIMEOUT);
+    pending.set(id, (err, res) => {
+      clearTimeout(timer);
+      if (err) reject(err); else resolve(res);
+    });
+    sendRelay(msg);
   });
-  send(msg);
 }
 
 function handleResponse(msg) {
   if (msg.type === 'disconnect') {
     console.log('Agent disconnected');
-    for (const [id, cb] of pending) {
+    for (const [, cb] of pending) {
       cb(new Error('Agent disconnected'));
     }
     pending.clear();
@@ -70,76 +74,173 @@ function handleResponse(msg) {
   }
 }
 
-function fuseErrno(err) {
-  if (!err) return 0;
-  const msg = err.message || '';
-  if (msg.includes('ENOENT') || msg.includes('no such file')) return fuse.ENOENT;
-  if (msg.includes('EACCES') || msg.includes('permission')) return fuse.EACCES;
-  if (msg.includes('ENOTDIR')) return fuse.ENOTDIR;
-  return fuse.EIO;
+// --- WebDAV server ---
+
+function davPath(url) {
+  // URL decode and normalize: /foo/bar → foo\bar (relative to agent ROOT)
+  const decoded = decodeURIComponent(url.replace(/\/$/, '') || '/');
+  return decoded.replace(/^\//, '').replace(/\//g, '\\');
 }
 
-function toFusePath(p) {
-  return p.replace(/^\//, '').replace(/\//g, path.sep);
+function toISO(ms) {
+  return new Date(ms).toUTCString();
 }
 
-function mountFuse() {
-  fuse.mount(MOUNT_POINT, {
-    displayFolder: true,
-    readdir(fusePath, cb) {
-      request('readdir', toFusePath(fusePath), {}, (err, res) => {
-        if (err) return cb(fuseErrno(err));
-        cb(0, res.entries);
-      });
-    },
-    getattr(fusePath, cb) {
-      request('stat', toFusePath(fusePath), {}, (err, res) => {
-        if (err) return cb(fuseErrno(err));
-        const s = res.stat;
-        cb(0, {
-          mtime: new Date(s.mtime),
-          atime: new Date(s.atime),
-          ctime: new Date(s.mtime),
-          nlink: s.nlink || 1,
-          size: s.size,
-          mode: s.isDirectory ? 16877 : 33188,
-          uid: s.uid || process.getuid?.() || 0,
-          gid: s.gid || process.getgid?.() || 0,
-        });
-      });
-    },
-    open(fusePath, flags, cb) {
-      request('stat', toFusePath(fusePath), {}, (err, res) => {
-        if (err) return cb(fuseErrno(err));
-        cb(0, null);
-      });
-    },
-    read(fusePath, fd, buf, len, pos, cb) {
-      request('read', toFusePath(fusePath), { pos, len }, (err, res) => {
-        if (err) return cb(fuseErrno(err));
-        const data = Buffer.from(res.data, 'base64');
-        data.copy(buf);
-        cb(data.length);
-      });
-    },
-  }, (err) => {
-    if (err) {
-      console.error('Mount error:', err.message);
-      process.exit(1);
+function multistatus(items) {
+  const responses = items.map(({ href, props, status }) => {
+    if (status) {
+      return `<D:response><D:href>${href}</D:href><D:status>HTTP/1.1 ${status}</D:status></D:response>`;
     }
+    const p = Object.entries(props).map(([k, v]) => `<D:${k}>${v}</D:${k}>`).join('');
+    return `<D:response><D:href>${href}</D:href><D:propstat><D:prop>${p}</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>`;
+  }).join('');
+  return `<?xml version="1.0" encoding="utf-8"?><D:multistatus xmlns:D="DAV:">${responses}</D:multistatus>`;
+}
+
+function propXml(stat, href) {
+  const props = {
+    getlastmodified: toISO(stat.mtime),
+    creationdate: toISO(stat.mtime),
+  };
+  if (stat.isDirectory) {
+    props.resourcetype = '<D:collection/>';
+  } else {
+    props.resourcetype = '';
+    props.getcontentlength = String(stat.size);
+  }
+  return { href, props };
+}
+
+const davServer = http.createServer(async (req, res) => {
+  const reqPath = davPath(req.url);
+
+  try {
+    if (req.method === 'OPTIONS') {
+      res.writeHead(200, {
+        DAV: '1',
+        Allow: 'OPTIONS, PROPFIND, GET, HEAD',
+        'MS-Author-Via': 'DAV',
+      });
+      res.end();
+      return;
+    }
+
+    if (req.method === 'PROPFIND') {
+      const depth = req.headers.depth || '1';
+      const statRes = await request('stat', reqPath, {});
+      const s = statRes.stat;
+      const baseHref = req.url.endsWith('/') || req.url === '/' ? req.url : req.url + '/';
+      const items = [propXml(s, req.url)];
+
+      if (s.isDirectory && depth !== '0') {
+        const dirRes = await request('readdir', reqPath, {});
+        for (const name of dirRes.entries) {
+          try {
+            const childPath = reqPath ? reqPath + '\\' + name : name;
+            const childStat = await request('stat', childPath, {});
+            const childHref = baseHref + encodeURIComponent(name) +
+              (childStat.stat.isDirectory ? '/' : '');
+            items.push(propXml(childStat.stat, childHref));
+          } catch {
+            // Skip entries we can't stat
+          }
+        }
+      }
+
+      res.writeHead(207, { 'Content-Type': 'application/xml; charset=utf-8' });
+      res.end(multistatus(items));
+      return;
+    }
+
+    if (req.method === 'GET' || req.method === 'HEAD') {
+      const statRes = await request('stat', reqPath, {});
+      const s = statRes.stat;
+
+      if (s.isDirectory) {
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        if (req.method === 'HEAD') { res.end(); return; }
+        const dirRes = await request('readdir', reqPath, {});
+        const html = dirRes.entries.map(n => `<a href="${encodeURIComponent(n)}">${n}</a>`).join('<br>');
+        res.end(`<html><body>${html}</body></html>`);
+        return;
+      }
+
+      // File — handle Range requests
+      const size = s.size;
+      const range = req.headers.range;
+      let start = 0;
+      let len = size;
+
+      if (range) {
+        const m = range.match(/bytes=(\d+)-(\d*)/);
+        if (m) {
+          start = parseInt(m[1], 10);
+          const end = m[2] ? parseInt(m[2], 10) : size - 1;
+          len = end - start + 1;
+        }
+      }
+
+      const readRes = await request('read', reqPath, { pos: start, len });
+      const data = Buffer.from(readRes.data, 'base64');
+
+      if (range) {
+        res.writeHead(206, {
+          'Content-Type': 'application/octet-stream',
+          'Content-Length': data.length,
+          'Content-Range': `bytes ${start}-${start + data.length - 1}/${size}`,
+          'Accept-Ranges': 'bytes',
+        });
+      } else {
+        res.writeHead(200, {
+          'Content-Type': 'application/octet-stream',
+          'Content-Length': data.length,
+          'Accept-Ranges': 'bytes',
+        });
+      }
+
+      if (req.method === 'HEAD') { res.end(); return; }
+      res.end(data);
+      return;
+    }
+
+    // Method not allowed
+    res.writeHead(405);
+    res.end();
+  } catch (err) {
+    const msg = err.message || '';
+    if (msg.includes('ENOENT') || msg.includes('no such file')) {
+      res.writeHead(404);
+    } else {
+      console.error(`WebDAV error [${req.method} ${req.url}]:`, msg);
+      res.writeHead(500);
+    }
+    res.end();
+  }
+});
+
+// --- Mount/unmount ---
+
+function doMount() {
+  try {
+    execSync(`net use ${MOUNT_POINT} http://localhost:${WEBDAV_PORT}/ /persistent:no`, { stdio: 'pipe' });
     mounted = true;
-    console.log(`Mounted at ${MOUNT_POINT}`);
-  });
+    console.log(`Mounted ${MOUNT_POINT}`);
+  } catch (err) {
+    console.error('Mount failed:', err.stderr?.toString().trim() || err.message);
+    console.log(`\nMount manually: net use ${MOUNT_POINT} http://localhost:${WEBDAV_PORT}/`);
+  }
 }
 
 function doUnmount(cb) {
   if (!mounted) return cb?.();
-  fuse.unmount(MOUNT_POINT, (err) => {
-    if (err) console.error('Unmount error:', err.message);
-    else console.log('Unmounted');
-    mounted = false;
-    cb?.();
-  });
+  try {
+    execSync(`net use ${MOUNT_POINT} /delete /y`, { stdio: 'pipe' });
+    console.log('Unmounted');
+  } catch {
+    // Already unmounted
+  }
+  mounted = false;
+  cb?.();
 }
 
 let reconnecting = false;
@@ -155,12 +256,13 @@ function doUnmountAndReconnect() {
   });
 }
 
+// --- Relay connection ---
+
 function connect() {
   socket = net.connect(RELAY_PORT, RELAY_HOST, () => {
     console.log('Connected to relay server');
-    // Handshake is plaintext
     socket.write(JSON.stringify({ role: 'mounter', agentId: AGENT_ID }) + '\n');
-    mountFuse();
+    doMount();
   });
 
   const rl = readline.createInterface({ input: socket });
@@ -173,7 +275,7 @@ function connect() {
 
   socket.on('close', () => {
     console.log('Disconnected from relay');
-    for (const [id, cb] of pending) {
+    for (const [, cb] of pending) {
       cb(new Error('Disconnected'));
     }
     pending.clear();
@@ -187,8 +289,15 @@ function connect() {
 
 process.on('SIGINT', () => {
   console.log('\nShutting down...');
-  doUnmount(() => process.exit(0));
+  doUnmount(() => {
+    davServer.close();
+    process.exit(0);
+  });
 });
 
-console.log(`Mounter starting. Agent=${AGENT_ID}, Mount=${MOUNT_POINT}`);
-connect();
+// Start WebDAV server first, then connect to relay
+davServer.listen(WEBDAV_PORT, '127.0.0.1', () => {
+  console.log(`WebDAV server on http://127.0.0.1:${WEBDAV_PORT}/`);
+  console.log(`Mounter starting. Agent=${AGENT_ID}, Mount=${MOUNT_POINT}`);
+  connect();
+});

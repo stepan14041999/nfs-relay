@@ -13,7 +13,7 @@ Access a Windows machine's filesystem from another Windows machine through a TLS
 
 - **Node.js 18+**
 - **OpenSSL** (for certificate generation)
-- **WinFsp** (on the mounter machine) — download from https://winfsp.dev
+- **WebClient service** (on mounter machine, enabled by default on Windows)
 
 ## Setup
 
