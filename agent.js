@@ -75,7 +75,9 @@ function connect() {
           break;
         }
         case 'read': {
-          const { pos, len } = msg;
+          const MAX_READ_LEN = 4 * 1024 * 1024;
+          const { pos } = msg;
+          const len = Math.min(msg.len, MAX_READ_LEN);
           const fh = await fsp.open(resolved, 'r');
           try {
             const buf = Buffer.alloc(len);

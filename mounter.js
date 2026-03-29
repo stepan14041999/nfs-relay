@@ -31,10 +31,21 @@ function send(obj) {
   }
 }
 
+const REQUEST_TIMEOUT = 30000;
+
 function request(op, reqPath, extra, cb) {
   const id = nextId++;
   const msg = { id, op, path: reqPath, ...extra };
-  pending.set(id, cb);
+  const timer = setTimeout(() => {
+    if (pending.has(id)) {
+      pending.delete(id);
+      cb(new Error('Request timed out'));
+    }
+  }, REQUEST_TIMEOUT);
+  pending.set(id, (err, res) => {
+    clearTimeout(timer);
+    cb(err, res);
+  });
   send(msg);
 }
 
@@ -138,10 +149,16 @@ function doUnmount(cb) {
   });
 }
 
+let reconnecting = false;
 function doUnmountAndReconnect() {
+  if (reconnecting) return;
+  reconnecting = true;
   doUnmount(() => {
     console.log('Reconnecting in 5s...');
-    setTimeout(connect, 5000);
+    setTimeout(() => {
+      reconnecting = false;
+      connect();
+    }, 5000);
   });
 }
 

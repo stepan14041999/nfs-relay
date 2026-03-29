@@ -35,11 +35,15 @@ const server = tls.createServer(serverOptions, (socket) => {
         if (msg.role === 'agent' && msg.id) {
           role = 'agent';
           peerId = msg.id;
+          const prev = agents.get(peerId);
+          if (prev && !prev.destroyed) prev.destroy();
           agents.set(peerId, socket);
           console.log(`Agent registered: ${peerId}`);
         } else if (msg.role === 'mounter' && msg.agentId) {
           role = 'mounter';
           peerId = msg.agentId;
+          const prev = mounters.get(peerId);
+          if (prev && !prev.destroyed) prev.destroy();
           mounters.set(peerId, socket);
           console.log(`Mounter registered for agent: ${peerId}`);
         } else {
