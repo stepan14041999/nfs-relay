@@ -1,28 +1,25 @@
 'use strict';
 
-const tls = require('tls');
-const fs = require('fs');
+const net = require('net');
 const fsp = require('fs/promises');
 const path = require('path');
 const readline = require('readline');
+const { deriveKey, encrypt, decrypt } = require('./crypto-utils');
 
-const RELAY_HOST = process.env.RELAY_HOST || 'cdn.overlewd.com';
+const RELAY_HOST = process.env.RELAY_HOST || '164.92.168.166';
 const RELAY_PORT = parseInt(process.env.RELAY_PORT, 10) || 15240;
 const AGENT_ID = process.env.AGENT_ID || 'pc1';
 const ROOT = path.resolve(process.env.AGENT_ROOT || 'C:\\Users\\Stepa');
 
-const clientOptions = {
-  key: fs.readFileSync(path.join(__dirname, 'certs', 'client1.key')),
-  cert: fs.readFileSync(path.join(__dirname, 'certs', 'client1.crt')),
-  ca: fs.readFileSync(path.join(__dirname, 'certs', 'ca.crt')),
-  rejectUnauthorized: true,
-  minVersion: 'TLSv1.3',
-  ciphers: 'TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256',
-};
+const key = deriveKey(
+  path.join(__dirname, 'certs', 'client1.key'),
+  path.join(__dirname, 'certs', 'server.crt'),
+);
 
 function connect() {
-  const socket = tls.connect(RELAY_PORT, RELAY_HOST, clientOptions, () => {
+  const socket = net.connect(RELAY_PORT, RELAY_HOST, () => {
     console.log('Connected to relay server');
+    // Handshake is plaintext
     socket.write(JSON.stringify({ role: 'agent', id: AGENT_ID }) + '\n');
   });
 
@@ -32,7 +29,7 @@ function connect() {
   rl.on('line', async (line) => {
     let msg;
     try {
-      msg = JSON.parse(line);
+      msg = JSON.parse(decrypt(key, line));
     } catch {
       return;
     }
@@ -108,13 +105,13 @@ function connect() {
   });
 
   socket.on('error', (err) => {
-    console.error('Connection error:', err.message);
+    console.error('Connection error:', err.code || err.message, err);
   });
 }
 
 function send(socket, obj) {
   if (!socket.destroyed) {
-    socket.write(JSON.stringify(obj) + '\n');
+    socket.write(encrypt(key, JSON.stringify(obj)) + '\n');
   }
 }
 

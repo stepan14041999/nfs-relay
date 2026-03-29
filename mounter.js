@@ -1,24 +1,20 @@
 'use strict';
 
-const tls = require('tls');
-const fs = require('fs');
+const net = require('net');
 const path = require('path');
 const readline = require('readline');
 const fuse = require('fuse-bindings');
+const { deriveKey, encrypt, decrypt } = require('./crypto-utils');
 
-const RELAY_HOST = process.env.RELAY_HOST || 'cdn.overlewd.com';
+const RELAY_HOST = process.env.RELAY_HOST || '164.92.168.166';
 const RELAY_PORT = parseInt(process.env.RELAY_PORT, 10) || 15240;
 const AGENT_ID = process.env.AGENT_ID || 'pc1';
 const MOUNT_POINT = process.env.MOUNT_POINT || 'Z:\\';
 
-const clientOptions = {
-  key: fs.readFileSync(path.join(__dirname, 'certs', 'client2.key')),
-  cert: fs.readFileSync(path.join(__dirname, 'certs', 'client2.crt')),
-  ca: fs.readFileSync(path.join(__dirname, 'certs', 'ca.crt')),
-  rejectUnauthorized: true,
-  minVersion: 'TLSv1.3',
-  ciphers: 'TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256',
-};
+const key = deriveKey(
+  path.join(__dirname, 'certs', 'client2.key'),
+  path.join(__dirname, 'certs', 'server.crt'),
+);
 
 let socket = null;
 let nextId = 1;
@@ -27,7 +23,7 @@ let mounted = false;
 
 function send(obj) {
   if (socket && !socket.destroyed) {
-    socket.write(JSON.stringify(obj) + '\n');
+    socket.write(encrypt(key, JSON.stringify(obj)) + '\n');
   }
 }
 
@@ -160,9 +156,10 @@ function doUnmountAndReconnect() {
 }
 
 function connect() {
-  socket = tls.connect(RELAY_PORT, RELAY_HOST, clientOptions, () => {
+  socket = net.connect(RELAY_PORT, RELAY_HOST, () => {
     console.log('Connected to relay server');
-    send({ role: 'mounter', agentId: AGENT_ID });
+    // Handshake is plaintext
+    socket.write(JSON.stringify({ role: 'mounter', agentId: AGENT_ID }) + '\n');
     mountFuse();
   });
 
@@ -170,7 +167,7 @@ function connect() {
   rl.on('error', () => {});
   rl.on('line', (line) => {
     try {
-      handleResponse(JSON.parse(line));
+      handleResponse(JSON.parse(decrypt(key, line)));
     } catch {}
   });
 
