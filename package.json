@@ -10,6 +10,7 @@
     "certs": "bash gen-certs.sh"
   },
   "dependencies": {
-    "fuse-bindings": "^2.11.2"
+    "fuse-bindings": "^2.11.2",
+    "ws": "^8.18.0"
   }
 }

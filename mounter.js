@@ -1,17 +1,17 @@
 'use strict';
 
-const tls = require('tls');
 const fs = require('fs');
 const path = require('path');
-const readline = require('readline');
+const WebSocket = require('ws');
 const fuse = require('fuse-bindings');
 
-const RELAY_HOST = process.env.RELAY_HOST || 'localhost';
+const RELAY_HOST = process.env.RELAY_HOST || 'cdn.overlewd.com';
 const RELAY_PORT = parseInt(process.env.RELAY_PORT, 10) || 8443;
+const RELAY_PATH = process.env.RELAY_PATH || '/nrscn';
 const AGENT_ID = process.env.AGENT_ID || 'pc1';
 const MOUNT_POINT = process.env.MOUNT_POINT || 'Z:\\';
 
-const clientOptions = {
+const tlsOptions = {
   key: fs.readFileSync(path.join(__dirname, 'certs', 'client2.key')),
   cert: fs.readFileSync(path.join(__dirname, 'certs', 'client2.crt')),
   ca: fs.readFileSync(path.join(__dirname, 'certs', 'ca.crt')),
@@ -20,14 +20,14 @@ const clientOptions = {
   ciphers: 'TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256',
 };
 
-let socket = null;
+let ws = null;
 let nextId = 1;
-const pending = new Map(); // id → callback(err, result)
+const pending = new Map();
 let mounted = false;
 
 function send(obj) {
-  if (socket && !socket.destroyed) {
-    socket.write(JSON.stringify(obj) + '\n');
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(obj));
   }
 }
 
@@ -52,7 +52,6 @@ function request(op, reqPath, extra, cb) {
 function handleResponse(msg) {
   if (msg.type === 'disconnect') {
     console.log('Agent disconnected');
-    // Reject all pending requests
     for (const [id, cb] of pending) {
       cb(new Error('Agent disconnected'));
     }
@@ -85,7 +84,6 @@ function fuseErrno(err) {
 }
 
 function toFusePath(p) {
-  // FUSE paths come as /foo/bar, convert to relative
   return p.replace(/^\//, '').replace(/\//g, path.sep);
 }
 
@@ -108,17 +106,16 @@ function mountFuse() {
           ctime: new Date(s.mtime),
           nlink: s.nlink || 1,
           size: s.size,
-          mode: s.isDirectory ? 16877 : 33188, // drwxr-xr-x : -rw-r--r--
+          mode: s.isDirectory ? 16877 : 33188,
           uid: s.uid || process.getuid?.() || 0,
           gid: s.gid || process.getgid?.() || 0,
         });
       });
     },
     open(fusePath, flags, cb) {
-      // Validate file exists via stat
       request('stat', toFusePath(fusePath), {}, (err, res) => {
         if (err) return cb(fuseErrno(err));
-        cb(0, null); // no file descriptor needed — stateless reads
+        cb(0, null);
       });
     },
     read(fusePath, fd, buf, len, pos, cb) {
@@ -163,23 +160,23 @@ function doUnmountAndReconnect() {
 }
 
 function connect() {
-  socket = tls.connect(RELAY_PORT, RELAY_HOST, clientOptions, () => {
+  const url = `wss://${RELAY_HOST}:${RELAY_PORT}${RELAY_PATH}`;
+  ws = new WebSocket(url, { ...tlsOptions });
+
+  ws.on('open', () => {
     console.log('Connected to relay server');
     send({ role: 'mounter', agentId: AGENT_ID });
     mountFuse();
   });
 
-  const rl = readline.createInterface({ input: socket });
-  rl.on('error', () => {});
-  rl.on('line', (line) => {
+  ws.on('message', (data) => {
     try {
-      handleResponse(JSON.parse(line));
+      handleResponse(JSON.parse(data.toString()));
     } catch {}
   });
 
-  socket.on('close', () => {
+  ws.on('close', () => {
     console.log('Disconnected from relay');
-    // Reject all pending
     for (const [id, cb] of pending) {
       cb(new Error('Disconnected'));
     }
@@ -187,12 +184,11 @@ function connect() {
     doUnmountAndReconnect();
   });
 
-  socket.on('error', (err) => {
+  ws.on('error', (err) => {
     console.error('Connection error:', err.message);
   });
 }
 
-// Graceful shutdown
 process.on('SIGINT', () => {
   console.log('\nShutting down...');
   doUnmount(() => process.exit(0));
