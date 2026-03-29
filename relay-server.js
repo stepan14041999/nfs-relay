@@ -67,8 +67,10 @@ const server = tls.createServer(serverOptions, (socket) => {
     }
   });
 
+  let cleaned = false;
   const cleanup = () => {
-    if (!role || !peerId) return;
+    if (cleaned || !role || !peerId) return;
+    cleaned = true;
 
     if (role === 'agent') {
       agents.delete(peerId);

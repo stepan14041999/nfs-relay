@@ -46,7 +46,7 @@ function connect() {
 
     try {
       const resolved = path.resolve(ROOT, reqPath || '');
-      if (!resolved.startsWith(ROOT)) {
+      if (resolved !== ROOT && !resolved.startsWith(ROOT + path.sep)) {
         send(socket, { id, error: 'Path traversal denied' });
         return;
       }
