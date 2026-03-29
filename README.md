@@ -1,58 +1,58 @@
 # NFS Relay
 
-Access a Windows machine's filesystem from another Windows machine through a TLS relay server.
+Access a Windows machine's filesystem from another Windows machine through a WebSocket relay server behind nginx.
 
 ## Architecture
 
 ```
-[Agent (Client 1)] --TLS 1.3--> [cdn.overlewd.com:15240] <--TLS 1.3-- [Mounter (Client 2)]
-                                  (relay-server.js)                      (Z:\)
+[Agent] --wss--> cdn.overlewd.com/nfrnc --wss--> [Mounter → Z:\]
+                 (Cloudflare → nginx → relay)
 ```
 
 ## Prerequisites
 
 - **Node.js 18+**
-- **OpenSSL** (for certificate generation)
 - **WebClient service** (on mounter machine, enabled by default on Windows)
 
 ## Setup
 
-### 1. Generate certificates
-
-```bash
-bash gen-certs.sh
-```
-
-Copy the `certs/` folder to all three machines. Each machine needs:
-- `ca.crt` (all)
-- `server.crt` + `server.key` (relay server)
-- `client1.crt` + `client1.key` (agent)
-- `client2.crt` + `client2.key` (mounter)
-
-### 2. Install dependencies
+### 1. Install dependencies
 
 ```bash
 npm install
 ```
 
-### 3. Start relay server
+### 2. Start relay server (on the server)
 
 ```bash
-# On the relay server (cdn.overlewd.com)
 node relay-server.js
 ```
 
-### 4. Start agent
+Listens on `127.0.0.1:15240`. Nginx proxies from `/nfrnc`.
+
+### 3. nginx configuration
+
+```nginx
+location /nfrnc {
+    proxy_pass http://127.0.0.1:15240;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host $host;
+    proxy_read_timeout 86400s;
+    proxy_send_timeout 86400s;
+}
+```
+
+### 4. Start agent (on Windows Client 1)
 
 ```bash
-# On Windows Client 1 (the machine sharing files)
 node agent.js
 ```
 
-### 5. Start mounter
+### 5. Start mounter (on Windows Client 2)
 
 ```bash
-# On Windows Client 2 (the machine mounting remote files)
 node mounter.js
 ```
 
@@ -62,15 +62,14 @@ The remote filesystem will appear at `Z:\`.
 
 | Variable | Default | Component | Description |
 |---|---|---|---|
-| `RELAY_HOST` | `cdn.overlewd.com` | agent, mounter | Relay server hostname |
-| `RELAY_PORT` | `15240` | all | Relay server port |
+| `RELAY_URL` | `wss://cdn.overlewd.com/nfrnc` | agent, mounter | Relay WebSocket URL |
+| `RELAY_PORT` | `15240` | relay | Local listen port |
 | `AGENT_ID` | `pc1` | agent, mounter | Agent identifier |
 | `AGENT_ROOT` | `C:\Users\Stepa` | agent | Root directory to share |
-| `MOUNT_POINT` | `Z:\` | mounter | Drive letter to mount |
+| `MOUNT_POINT` | `Z:` | mounter | Drive letter to mount |
+| `WEBDAV_PORT` | `18080` | mounter | Local WebDAV server port |
 
 ## Security
 
-- TLS 1.3 with mutual authentication (mTLS)
-- Ciphers: `TLS_AES_256_GCM_SHA384`, `TLS_CHACHA20_POLY1305_SHA256`
+- TLS terminated by Cloudflare + nginx
 - Path traversal protection on agent side
-- All certificates signed by a shared CA

@@ -1,31 +1,23 @@
 'use strict';
 
-const net = require('net');
 const http = require('http');
 const path = require('path');
-const readline = require('readline');
 const { execSync } = require('child_process');
-const { deriveKey, encrypt, decrypt, keyFingerprint } = require('./crypto-utils');
+const WebSocket = require('ws');
 
-const RELAY_HOST = process.env.RELAY_HOST || '164.92.168.166';
-const RELAY_PORT = parseInt(process.env.RELAY_PORT, 10) || 15240;
+const RELAY_URL = process.env.RELAY_URL || 'wss://cdn.overlewd.com/nfrnc';
 const AGENT_ID = process.env.AGENT_ID || 'pc1';
 const MOUNT_POINT = process.env.MOUNT_POINT || 'Z:';
 const WEBDAV_PORT = parseInt(process.env.WEBDAV_PORT, 10) || 18080;
 
-const key = deriveKey(
-  path.join(__dirname, 'certs', 'client2.key'),
-  path.join(__dirname, 'certs', 'server.crt'),
-);
-
-let socket = null;
+let ws = null;
 let nextId = 1;
 const pending = new Map();
 let mounted = false;
 
 function sendRelay(obj) {
-  if (socket && !socket.destroyed) {
-    socket.write(encrypt(key, JSON.stringify(obj)) + '\n');
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(obj));
   }
 }
 
@@ -77,7 +69,6 @@ function handleResponse(msg) {
 // --- WebDAV server ---
 
 function davPath(url) {
-  // URL decode and normalize: /foo/bar → foo\bar (relative to agent ROOT)
   const decoded = decodeURIComponent(url.replace(/\/$/, '') || '/');
   return decoded.replace(/^\//, '').replace(/\//g, '\\');
 }
@@ -87,10 +78,7 @@ function toISO(ms) {
 }
 
 function multistatus(items) {
-  const responses = items.map(({ href, props, status }) => {
-    if (status) {
-      return `<D:response><D:href>${href}</D:href><D:status>HTTP/1.1 ${status}</D:status></D:response>`;
-    }
+  const responses = items.map(({ href, props }) => {
     const p = Object.entries(props).map(([k, v]) => `<D:${k}>${v}</D:${k}>`).join('');
     return `<D:response><D:href>${href}</D:href><D:propstat><D:prop>${p}</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>`;
   }).join('');
@@ -165,7 +153,6 @@ const davServer = http.createServer(async (req, res) => {
         return;
       }
 
-      // File — handle Range requests
       const size = s.size;
       const range = req.headers.range;
       let start = 0;
@@ -203,7 +190,6 @@ const davServer = http.createServer(async (req, res) => {
       return;
     }
 
-    // Method not allowed
     res.writeHead(405);
     res.end();
   } catch (err) {
@@ -227,7 +213,7 @@ function doMount() {
     console.log(`Mounted ${MOUNT_POINT}`);
   } catch (err) {
     console.error('Mount failed:', err.stderr?.toString().trim() || err.message);
-    console.log(`\nMount manually: net use ${MOUNT_POINT} http://localhost:${WEBDAV_PORT}/`);
+    console.log(`Mount manually: net use ${MOUNT_POINT} http://localhost:${WEBDAV_PORT}/`);
   }
 }
 
@@ -236,9 +222,7 @@ function doUnmount(cb) {
   try {
     execSync(`net use ${MOUNT_POINT} /delete /y`, { stdio: 'pipe' });
     console.log('Unmounted');
-  } catch {
-    // Already unmounted
-  }
+  } catch {}
   mounted = false;
   cb?.();
 }
@@ -259,21 +243,21 @@ function doUnmountAndReconnect() {
 // --- Relay connection ---
 
 function connect() {
-  socket = net.connect(RELAY_PORT, RELAY_HOST, () => {
-    console.log('Connected to relay server');
-    socket.write(JSON.stringify({ role: 'mounter', agentId: AGENT_ID }) + '\n');
+  ws = new WebSocket(RELAY_URL);
+
+  ws.on('open', () => {
+    console.log('Connected to relay');
+    ws.send(JSON.stringify({ role: 'mounter', agentId: AGENT_ID }));
     doMount();
   });
 
-  const rl = readline.createInterface({ input: socket });
-  rl.on('error', () => {});
-  rl.on('line', (line) => {
+  ws.on('message', (data) => {
     try {
-      handleResponse(JSON.parse(decrypt(key, line)));
+      handleResponse(JSON.parse(data.toString()));
     } catch {}
   });
 
-  socket.on('close', () => {
+  ws.on('close', () => {
     console.log('Disconnected from relay');
     for (const [, cb] of pending) {
       cb(new Error('Disconnected'));
@@ -282,7 +266,7 @@ function connect() {
     doUnmountAndReconnect();
   });
 
-  socket.on('error', (err) => {
+  ws.on('error', (err) => {
     console.error('Connection error:', err.message);
   });
 }
@@ -295,9 +279,8 @@ process.on('SIGINT', () => {
   });
 });
 
-// Start WebDAV server first, then connect to relay
 davServer.listen(WEBDAV_PORT, '127.0.0.1', () => {
   console.log(`WebDAV server on http://127.0.0.1:${WEBDAV_PORT}/`);
-  console.log(`Mounter starting. Agent=${AGENT_ID}, Mount=${MOUNT_POINT}, key=${keyFingerprint(key)}`);
+  console.log(`Mounter starting. Agent=${AGENT_ID}, Mount=${MOUNT_POINT}`);
   connect();
 });

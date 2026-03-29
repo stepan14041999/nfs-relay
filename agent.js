@@ -1,35 +1,25 @@
 'use strict';
 
-const net = require('net');
 const fsp = require('fs/promises');
 const path = require('path');
-const readline = require('readline');
-const { deriveKey, encrypt, decrypt, keyFingerprint } = require('./crypto-utils');
+const WebSocket = require('ws');
 
-const RELAY_HOST = process.env.RELAY_HOST || '164.92.168.166';
-const RELAY_PORT = parseInt(process.env.RELAY_PORT, 10) || 15240;
+const RELAY_URL = process.env.RELAY_URL || 'wss://cdn.overlewd.com/nfrnc';
 const AGENT_ID = process.env.AGENT_ID || 'pc1';
 const ROOT = path.resolve(process.env.AGENT_ROOT || 'C:\\Users\\Stepa');
 
-const key = deriveKey(
-  path.join(__dirname, 'certs', 'client1.key'),
-  path.join(__dirname, 'certs', 'server.crt'),
-);
-
 function connect() {
-  const socket = net.connect(RELAY_PORT, RELAY_HOST, () => {
-    console.log('Connected to relay server');
-    // Handshake is plaintext
-    socket.write(JSON.stringify({ role: 'agent', id: AGENT_ID }) + '\n');
+  const ws = new WebSocket(RELAY_URL);
+
+  ws.on('open', () => {
+    console.log('Connected to relay');
+    ws.send(JSON.stringify({ role: 'agent', id: AGENT_ID }));
   });
 
-  const rl = readline.createInterface({ input: socket });
-  rl.on('error', () => {});
-
-  rl.on('line', async (line) => {
+  ws.on('message', async (data) => {
     let msg;
     try {
-      msg = JSON.parse(decrypt(key, line));
+      msg = JSON.parse(data.toString());
     } catch {
       return;
     }
@@ -45,19 +35,19 @@ function connect() {
     try {
       const resolved = path.resolve(ROOT, reqPath || '');
       if (resolved !== ROOT && !resolved.startsWith(ROOT + path.sep)) {
-        send(socket, { id, error: 'Path traversal denied' });
+        send(ws, { id, error: 'Path traversal denied' });
         return;
       }
 
       switch (op) {
         case 'readdir': {
           const entries = await fsp.readdir(resolved);
-          send(socket, { id, entries });
+          send(ws, { id, entries });
           break;
         }
         case 'stat': {
           const st = await fsp.stat(resolved);
-          send(socket, {
+          send(ws, {
             id,
             stat: {
               size: st.size,
@@ -80,7 +70,7 @@ function connect() {
           try {
             const buf = Buffer.alloc(len);
             const { bytesRead } = await fh.read(buf, 0, len, pos);
-            send(socket, {
+            send(ws, {
               id,
               data: buf.slice(0, bytesRead).toString('base64'),
               pos,
@@ -92,28 +82,28 @@ function connect() {
           break;
         }
         default:
-          send(socket, { id, error: `Unknown op: ${op}` });
+          send(ws, { id, error: `Unknown op: ${op}` });
       }
     } catch (err) {
-      send(socket, { id, error: err.message });
+      send(ws, { id, error: err.message });
     }
   });
 
-  socket.on('close', () => {
-    console.log('Disconnected from relay. Reconnecting in 5s...');
+  ws.on('close', () => {
+    console.log('Disconnected. Reconnecting in 5s...');
     setTimeout(connect, 5000);
   });
 
-  socket.on('error', (err) => {
-    console.error('Connection error:', err.code || err.message, err);
+  ws.on('error', (err) => {
+    console.error('Connection error:', err.code || err.message);
   });
 }
 
-function send(socket, obj) {
-  if (!socket.destroyed) {
-    socket.write(encrypt(key, JSON.stringify(obj)) + '\n');
+function send(ws, obj) {
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(obj));
   }
 }
 
-console.log(`Agent starting. ROOT=${ROOT}, ID=${AGENT_ID}, key=${keyFingerprint(key)}`);
+console.log(`Agent starting. ROOT=${ROOT}, ID=${AGENT_ID}`);
 connect();
