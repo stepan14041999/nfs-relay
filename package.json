@@ -1,0 +1,15 @@
+{
+  "name": "nfs-relay",
+  "version": "1.0.0",
+  "description": "Relay File Agent — access remote Windows filesystem via TLS relay and FUSE mount",
+  "private": true,
+  "scripts": {
+    "server": "node relay-server.js",
+    "agent": "node agent.js",
+    "mounter": "node mounter.js",
+    "certs": "bash gen-certs.sh"
+  },
+  "dependencies": {
+    "fuse-bindings": "^2.11.2"
+  }
+}
